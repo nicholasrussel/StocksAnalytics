@@ -1,0 +1,29 @@
+name: Daily Worker
+
+on:
+  schedule:
+    - cron: '0 1 * * *'  # 08:00 WIB (UTC+7)
+  workflow_dispatch:       # manual trigger dari GitHub UI
+
+jobs:
+  run-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: api/go.sum
+
+      - name: Run news → analyze → notify
+        env:
+          DATABASE_URL:        ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FINNHUB_API_KEY:     ${{ secrets.FINNHUB_API_KEY }}
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
+          LLM_MODEL:           ${{ secrets.LLM_MODEL }}
+        run: go run ./cmd/worker -jobs=news,analyze,notify

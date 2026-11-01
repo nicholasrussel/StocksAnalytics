@@ -1,0 +1,54 @@
+name: jobs
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'   # news, filings, analyze, notify
+    - cron: '30 0 * * *'     # digest 07.30 WIB
+    - cron: '23 2 * * *'     # fundamentals, maintenance
+    - cron: '41 3 * * 1'     # sync-companies mingguan
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Nama job, dipisah koma'
+        required: true
+
+concurrency:
+  group: jobs
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+      - name: Pilih job
+        id: pick
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_JOB: ${{ inputs.job }}
+        run: |
+          case "$SCHEDULE" in
+            '7,37 * * * *') JOBS='news,filings,analyze,notify' ;;
+            '30 0 * * *')   JOBS='digest' ;;
+            '23 2 * * *')   JOBS='fundamentals,maintenance' ;;
+            '41 3 * * 1')   JOBS='sync-companies' ;;
+            *)              JOBS="$INPUT_JOB" ;;
+          esac
+          echo "jobs=$JOBS" >> "$GITHUB_OUTPUT"
+      - name: Jalankan worker
+        working-directory: api
+        env:
+          JOBS: ${{ steps.pick.outputs.jobs }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: go run ./cmd/worker -jobs="$JOBS"

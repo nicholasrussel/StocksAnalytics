@@ -1,0 +1,130 @@
+package news
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+)
+
+type Item struct {
+	Headline    string    `json:"headline"`
+	Source      string    `json:"source"`
+	URL         string    `json:"url"`
+	Summary     string    `json:"summary"`
+	Image       string    `json:"image"`
+	Category    string    `json:"category"`
+	PublishedAt time.Time `json:"published_at"`
+}
+
+type FinnhubClient struct {
+	apiKey string
+	http   *http.Client
+}
+
+func NewFinnhubClient(apiKey string) *FinnhubClient {
+	return &FinnhubClient{
+		apiKey: apiKey,
+		http:   &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+func (c *FinnhubClient) FetchMarketNews(ctx context.Context, category string) ([]Item, error) {
+	url := fmt.Sprintf("https://finnhub.io/api/v1/news?category=%s&token=%s", category, c.apiKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("finnhub: status %d", resp.StatusCode)
+	}
+	var raw []struct {
+		Datetime int64  `json:"datetime"`
+		Headline string `json:"headline"`
+		Source   string `json:"source"`
+		Summary  string `json:"summary"`
+		Image    string `json:"image"`
+		Category string `json:"category"`
+		URL      string `json:"url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	items := make([]Item, 0, len(raw))
+	for _, r := range raw {
+		if r.URL == "" || r.Headline == "" {
+			continue
+		}
+		items = append(items, Item{
+			Headline:    r.Headline,
+			Source:      r.Source,
+			URL:         r.URL,
+			Summary:     r.Summary,
+			Image:       r.Image,
+			Category:    r.Category,
+			PublishedAt: time.Unix(r.Datetime, 0),
+		})
+	}
+	return items, nil
+}
+
+func (c *FinnhubClient) FetchCompanyNews(ctx context.Context, ticker string, from, to time.Time) ([]Item, error) {
+	url := fmt.Sprintf(
+		"https://finnhub.io/api/v1/company-news?symbol=%s&from=%s&to=%s&token=%s",
+		ticker,
+		from.Format("2006-01-02"),
+		to.Format("2006-01-02"),
+		c.apiKey,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("finnhub: status %d", resp.StatusCode)
+	}
+
+	var raw []struct {
+		Datetime int64  `json:"datetime"`
+		Headline string `json:"headline"`
+		Source   string `json:"source"`
+		Summary  string `json:"summary"`
+		Image    string `json:"image"`
+		Category string `json:"category"`
+		URL      string `json:"url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	items := make([]Item, 0, len(raw))
+	for _, r := range raw {
+		if r.URL == "" || r.Headline == "" {
+			continue
+		}
+		items = append(items, Item{
+			Headline:    r.Headline,
+			Source:      r.Source,
+			URL:         r.URL,
+			Summary:     r.Summary,
+			Image:       r.Image,
+			Category:    r.Category,
+			PublishedAt: time.Unix(r.Datetime, 0),
+		})
+	}
+	return items, nil
+}
