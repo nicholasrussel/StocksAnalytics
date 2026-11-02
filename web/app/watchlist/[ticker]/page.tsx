@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Nav } from "@/components/layout/nav";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { StockAnalysis, StockAnalysisSkeleton } from "./_components/stock-analysis";
+import { FundamentalsAnalysis, FundamentalsAnalysisSkeleton } from "./_components/fundamentals";
+import { InsiderTrading, InsiderTradingSkeleton } from "./_components/insider-trading";
 
 export const instant = false;
 
@@ -46,11 +48,39 @@ export default async function StockPage({ params }: Props) {
             </div>
           </div>
 
-          {/* LLM Analysis */}
+          {/* Insider Trading (Form 4) */}
           <Card>
             <CardHeader>
               <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
-                Ringkasan AI (Gemini)
+                Transaksi Insider
+              </p>
+            </CardHeader>
+            <CardContent>
+              <Suspense fallback={<InsiderTradingSkeleton />}>
+                <InsiderTrading ticker={symbol} email={email} />
+              </Suspense>
+            </CardContent>
+          </Card>
+
+          {/* Laporan Keuangan + AI Insight */}
+          <Card>
+            <CardHeader>
+              <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                Laporan Keuangan
+              </p>
+            </CardHeader>
+            <CardContent>
+              <Suspense fallback={<FundamentalsAnalysisSkeleton />}>
+                <FundamentalsAnalysis ticker={symbol} email={email} />
+              </Suspense>
+            </CardContent>
+          </Card>
+
+          {/* LLM Analysis (news-based) */}
+          <Card>
+            <CardHeader>
+              <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                Ringkasan Berita AI
               </p>
             </CardHeader>
             <CardContent>

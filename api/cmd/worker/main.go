@@ -12,9 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/json"
+	"sync"
+
 	"github.com/joho/godotenv"
+	"github.com/tripleboys27/stock-dashboard/api/internal/fmp"
 	"github.com/tripleboys27/stock-dashboard/api/internal/llm"
 	"github.com/tripleboys27/stock-dashboard/api/internal/news"
+	"github.com/tripleboys27/stock-dashboard/api/internal/scorecard"
 	"github.com/tripleboys27/stock-dashboard/api/internal/store"
 	"github.com/tripleboys27/stock-dashboard/api/internal/telegram"
 )
@@ -43,6 +48,10 @@ func main() {
 	bot := telegram.NewBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	finnhub := news.NewFinnhubClient(os.Getenv("FINNHUB_API_KEY"))
 	gemini := llm.NewGeminiClient(os.Getenv("GEMINI_API_KEY"), os.Getenv("LLM_MODEL"))
+	var fmpClient *fmp.Client
+	if key := os.Getenv("FMP_API_KEY"); key != "" {
+		fmpClient = fmp.NewClient(key)
+	}
 
 	for _, job := range strings.Split(*jobs, ",") {
 		job = strings.TrimSpace(job)
@@ -60,6 +69,8 @@ func main() {
 			runAnalyze(ctx, db, gemini)
 		case "notify":
 			runNotify(ctx, db, bot)
+		case "fundamentals":
+			runFundamentals(ctx, db, fmpClient, gemini, finnhub)
 		default:
 			slog.Warn("unknown job", "job", job)
 		}
@@ -332,4 +343,140 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	return s
+}
+
+// ── fundamentals ──────────────────────────────────────────────────────────────
+
+func runFundamentals(ctx context.Context, db *store.DB, fmpClient *fmp.Client, gemini *llm.GeminiClient, finnhub *news.FinnhubClient) {
+	if fmpClient == nil {
+		slog.Warn("fundamentals: FMP_API_KEY not set, skipping")
+		return
+	}
+
+	tickers, err := db.GetAllWatchlistTickers(ctx)
+	if err != nil {
+		slog.Error("fundamentals: get tickers", "err", err)
+		return
+	}
+	if len(tickers) == 0 {
+		slog.Info("fundamentals: no tickers in any watchlist")
+		return
+	}
+	slog.Info("fundamentals: processing tickers", "count", len(tickers))
+
+	staleDays := 7 * 24 * time.Hour
+	var refreshed, skipped, failed int
+
+	for _, ticker := range tickers {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Skip if scorecard is still fresh
+		cached, err := db.GetLatestScorecard(ctx, ticker)
+		if err == nil && time.Since(cached.ComputedAt) < staleDays {
+			slog.Info("fundamentals: skipping fresh scorecard", "ticker", ticker,
+				"age_hours", int(time.Since(cached.ComputedAt).Hours()))
+			skipped++
+			continue
+		}
+
+		// Fetch FMP data concurrently
+		var (
+			incomes   []fmp.IncomeStatement
+			balances  []fmp.BalanceSheet
+			cashflows []fmp.CashFlowStatement
+			quote     *fmp.Quote
+			fetchErr  error
+			mu        sync.Mutex
+			wg        sync.WaitGroup
+		)
+
+		fetch := func(fn func() error) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if e := fn(); e != nil {
+					mu.Lock()
+					fetchErr = e
+					mu.Unlock()
+				}
+			}()
+		}
+
+		fetch(func() error {
+			v, e := fmpClient.GetIncomeStatements(ctx, ticker, 2)
+			if e == nil { mu.Lock(); incomes = v; mu.Unlock() }
+			return e
+		})
+		fetch(func() error {
+			v, e := fmpClient.GetBalanceSheets(ctx, ticker, 2)
+			if e == nil { mu.Lock(); balances = v; mu.Unlock() }
+			return e
+		})
+		fetch(func() error {
+			v, e := fmpClient.GetCashFlowStatements(ctx, ticker, 2)
+			if e == nil { mu.Lock(); cashflows = v; mu.Unlock() }
+			return e
+		})
+		fetch(func() error {
+			v, e := fmpClient.GetQuote(ctx, ticker)
+			if e == nil { mu.Lock(); quote = v; mu.Unlock() }
+			return e
+		})
+		wg.Wait()
+
+		if fetchErr != nil || len(incomes) == 0 || len(balances) == 0 || len(cashflows) == 0 {
+			slog.Warn("fundamentals: fetch failed", "ticker", ticker, "err", fetchErr)
+			failed++
+			continue
+		}
+
+		var prevIncome *fmp.IncomeStatement
+		var prevBalance *fmp.BalanceSheet
+		if len(incomes) > 1 {
+			prevIncome = &incomes[1]
+		}
+		if len(balances) > 1 {
+			prevBalance = &balances[1]
+		}
+
+		sc := scorecard.Compute(ticker, incomes[0], balances[0], cashflows[0], quote, prevIncome, prevBalance)
+
+		// Fetch headlines for LLM context
+		newsItems, _ := finnhub.FetchCompanyNews(ctx, ticker, time.Now().Add(-7*24*time.Hour), time.Now())
+		headlines := make([]string, 0, len(newsItems))
+		for _, n := range newsItems {
+			headlines = append(headlines, n.Headline)
+		}
+
+		metricsJSON, _ := json.Marshal(sc)
+		insight, err := gemini.AnalyzeFundamentals(ctx, ticker, string(metricsJSON), headlines)
+		if err != nil {
+			slog.Warn("fundamentals: LLM failed", "ticker", ticker, "err", err)
+			// Persist without insight rather than skipping entirely
+		}
+
+		flagsJSON, _ := json.Marshal(sc.Flags)
+		groupStatus, _ := json.Marshal(map[string]string{"piotroski": sc.PiotroskiGrade})
+		insightStr := ""
+		if insight != nil {
+			b, _ := json.Marshal(insight)
+			insightStr = string(b)
+		}
+		periodEnd, _ := time.Parse("2006-01-02", sc.PeriodEnd)
+		if e := db.UpsertScorecard(ctx, ticker, periodEnd, metricsJSON, flagsJSON, groupStatus, insightStr); e != nil {
+			slog.Warn("fundamentals: db upsert failed", "ticker", ticker, "err", e)
+			failed++
+			continue
+		}
+
+		slog.Info("fundamentals: refreshed", "ticker", ticker,
+			"piotroski", sc.PiotroskiScore, "grade", sc.PiotroskiGrade)
+		refreshed++
+	}
+
+	slog.Info("fundamentals: done", "refreshed", refreshed, "skipped_fresh", skipped, "failed", failed)
 }

@@ -86,6 +86,60 @@ Berita:
 	return &analysis, nil
 }
 
+// FundamentalsInsight is the LLM analysis of a company's financial scorecard.
+type FundamentalsInsight struct {
+	Summary     string   `json:"summary"`     // 3-4 kalimat gambaran umum
+	Strengths   []string `json:"strengths"`   // kelebihan utama
+	Risks       []string `json:"risks"`       // risiko utama
+	Outlook     string   `json:"outlook"`     // "positif" | "netral" | "negatif"
+	ContextNote string   `json:"context_note"` // kaitan dengan berita terkini
+}
+
+// AnalyzeFundamentals generates LLM insights from a scorecard + recent news headlines.
+// metricsJSON is the JSON-encoded Scorecard; newsHeadlines is a list of recent news titles.
+func (c *GeminiClient) AnalyzeFundamentals(ctx context.Context, ticker, metricsJSON string, newsHeadlines []string) (*FundamentalsInsight, error) {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Kamu adalah analis fundamental saham. Analisis kondisi keuangan %s berdasarkan data berikut.\n\n", ticker))
+	sb.WriteString("=== DATA KEUANGAN ===\n")
+	sb.WriteString(metricsJSON)
+	sb.WriteString("\n\n")
+
+	if len(newsHeadlines) > 0 {
+		sb.WriteString("=== BERITA TERKINI ===\n")
+		limit := 10
+		if len(newsHeadlines) < limit {
+			limit = len(newsHeadlines)
+		}
+		for _, h := range newsHeadlines[:limit] {
+			sb.WriteString("- " + h + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(`Berikan analisis dalam JSON berikut (jangan tambahkan teks lain):
+{
+  "summary": "gambaran kondisi keuangan 3-4 kalimat dalam Bahasa Indonesia, sebutkan angka kunci",
+  "strengths": ["kelebihan 1", "kelebihan 2", "kelebihan 3"],
+  "risks": ["risiko 1", "risiko 2"],
+  "outlook": "positif|netral|negatif",
+  "context_note": "1-2 kalimat kaitan antara kondisi keuangan dengan berita terkini di atas"
+}`)
+
+	text, err := c.generate(ctx, sb.String())
+	if err != nil {
+		return nil, err
+	}
+
+	var insight FundamentalsInsight
+	if err := json.Unmarshal([]byte(stripCodeFence(text)), &insight); err != nil {
+		return nil, fmt.Errorf("gemini: failed to parse fundamentals insight: %w — raw: %.200s", err, text)
+	}
+	if insight.Outlook == "" {
+		insight.Outlook = "netral"
+	}
+	return &insight, nil
+}
+
 type NewsAnalysis struct {
 	Importance int    `json:"importance"`
 	Sentiment  string `json:"sentiment"`
