@@ -140,6 +140,56 @@ func (c *GeminiClient) AnalyzeFundamentals(ctx context.Context, ticker, metricsJ
 	return &insight, nil
 }
 
+// SectorInsight is the LLM analysis of S&P 500 sector rotation.
+type SectorInsight struct {
+	Summary   string   `json:"summary"`   // 2-3 kalimat kondisi pasar
+	Leaders   []string `json:"leaders"`   // penjelasan sektor pemimpin
+	Laggards  []string `json:"laggards"`  // penjelasan sektor terlemah
+	Watch     []string `json:"watch"`     // sektor yang perlu dicermati untuk riset ticker
+	Sentiment string   `json:"sentiment"` // "positif" | "netral" | "negatif"
+}
+
+// AnalyzeSectors generates LLM insight about current sector rotation.
+// sectorData is a plain-text list of "TICKER (Name): +/-X.XX%" sorted by performance.
+func (c *GeminiClient) AnalyzeSectors(ctx context.Context, sectorData string) (*SectorInsight, error) {
+	prompt := fmt.Sprintf(`Kamu adalah analis pasar saham Amerika untuk investor retail Indonesia.
+Berikut performa sektor S&P 500 hari ini (sortir terbaik ke terburuk):
+
+%s
+Berikan analisis rotasi sektor dalam JSON (jangan tambahkan teks lain):
+{
+  "summary": "2-3 kalimat kondisi pasar hari ini dalam Bahasa Indonesia",
+  "leaders": ["XLE memimpin karena ... (1 kalimat)", "XLI naik karena ..."],
+  "laggards": ["XLU tertinggal karena ... (1 kalimat)"],
+  "watch": ["sektor yang menarik untuk riset ticker baru, 1 kalimat per item"],
+  "sentiment": "positif|netral|negatif"
+}
+leaders & laggards: 2-3 item masing-masing. watch: 1-2 item.`, sectorData)
+
+	text, err := c.generate(ctx, prompt)
+	if err != nil {
+		return nil, err
+	}
+
+	var insight SectorInsight
+	if err := json.Unmarshal([]byte(stripCodeFence(text)), &insight); err != nil {
+		return nil, fmt.Errorf("gemini: failed to parse sector insight: %w — raw: %.200s", err, text)
+	}
+	if insight.Sentiment == "" {
+		insight.Sentiment = "netral"
+	}
+	if insight.Leaders == nil {
+		insight.Leaders = []string{}
+	}
+	if insight.Laggards == nil {
+		insight.Laggards = []string{}
+	}
+	if insight.Watch == nil {
+		insight.Watch = []string{}
+	}
+	return &insight, nil
+}
+
 type NewsAnalysis struct {
 	Importance int    `json:"importance"`
 	Sentiment  string `json:"sentiment"`

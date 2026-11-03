@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -131,15 +132,16 @@ type CashFlowStatement struct {
 
 // Quote holds real-time price and market cap.
 type Quote struct {
-	Symbol            string  `json:"symbol"`
-	Price             float64 `json:"price"`
-	MarketCap         float64 `json:"marketCap"`
-	PE                float64 `json:"pe"`
-	EPS               float64 `json:"eps"`
-	Beta              float64 `json:"beta"`
-	YearHigh          float64 `json:"yearHigh"`
-	YearLow           float64 `json:"yearLow"`
-	SharesOutstanding float64 `json:"sharesOutstanding"`
+	Symbol             string  `json:"symbol"`
+	Price              float64 `json:"price"`
+	ChangesPercentage  float64 `json:"changesPercentage"`
+	MarketCap          float64 `json:"marketCap"`
+	PE                 float64 `json:"pe"`
+	EPS                float64 `json:"eps"`
+	Beta               float64 `json:"beta"`
+	YearHigh           float64 `json:"yearHigh"`
+	YearLow            float64 `json:"yearLow"`
+	SharesOutstanding  float64 `json:"sharesOutstanding"`
 }
 
 func (c *Client) GetIncomeStatements(ctx context.Context, ticker string, limit int) ([]IncomeStatement, error) {
@@ -181,6 +183,13 @@ func (c *Client) GetQuote(ctx context.Context, ticker string) (*Quote, error) {
 		return nil, fmt.Errorf("fmp: no quote data for %s", ticker)
 	}
 	return &result[0], nil
+}
+
+// GetQuotes fetches quotes for multiple tickers in a single API call.
+func (c *Client) GetQuotes(ctx context.Context, tickers []string) ([]Quote, error) {
+	var result []Quote
+	err := c.Fetch(ctx, "quote", P{"symbol": strings.Join(tickers, ",")}, &result)
+	return result, err
 }
 
 // InsiderTransaction represents one Form 4 SEC filing transaction.

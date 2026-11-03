@@ -1,7 +1,8 @@
 import { auth } from "@/auth";
 import { goFetch } from "@/lib/go-api";
 import { AddStockForm } from "@/components/watchlist/add-stock-form";
-import { WatchlistItem, type WatchlistItemData } from "@/components/watchlist/watchlist-item";
+import { CompareSelector } from "@/components/watchlist/compare-selector";
+import type { WatchlistItemData } from "@/components/watchlist/watchlist-item";
 import { Nav } from "@/components/layout/nav";
 
 export const instant = false;
@@ -32,15 +33,12 @@ export default async function WatchlistPage() {
 
         <AddStockForm />
 
-        <div className="space-y-2">
-          {items.length === 0 ? (
-            <p className="text-sm text-zinc-400 dark:text-zinc-600 text-center py-10">
-              Belum ada saham. Tambahkan di atas.
-            </p>
-          ) : (
-            items.map((item) => <WatchlistItem key={item.ticker} item={item} />)
-          )}
-        </div>
+        {items.length > 1 && (
+          <p className="text-xs text-zinc-400 dark:text-zinc-500 -mb-2">
+            Centang 2–5 saham untuk membandingkan
+          </p>
+        )}
+        <CompareSelector items={items} />
       </div>
     </main>
     </>

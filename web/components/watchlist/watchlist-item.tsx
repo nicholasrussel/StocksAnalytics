@@ -12,18 +12,49 @@ export interface WatchlistItemData {
   added_at: string;
 }
 
-export function WatchlistItem({ item }: { item: WatchlistItemData }) {
+export function WatchlistItem({
+  item,
+  selected,
+  onToggle,
+}: {
+  item: WatchlistItemData;
+  selected?: boolean;
+  onToggle?: () => void;
+}) {
   return (
-    <div className="flex items-center justify-between px-4 py-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors">
-      <Link
-        href={`/watchlist/${item.ticker}`}
-        className="flex items-center gap-3 min-w-0 flex-1"
-      >
-        <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-zinc-100 dark:bg-zinc-800 shrink-0">
+    <div className={[
+      "flex items-center gap-3 px-4 py-3 rounded-lg border bg-white dark:bg-zinc-900 transition-colors",
+      selected
+        ? "border-blue-400 dark:border-blue-600 ring-1 ring-blue-300 dark:ring-blue-700"
+        : "border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700",
+    ].join(" ")}>
+      {/* Logo + checkbox grouped together */}
+      <div className="flex items-center gap-1.5 shrink-0">
+        {onToggle && (
+          <button
+            onClick={(e) => { e.preventDefault(); onToggle(); }}
+            className={[
+              "w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 transition-colors",
+              selected
+                ? "bg-blue-500 border-blue-500 text-white"
+                : "border-zinc-300 dark:border-zinc-600 hover:border-blue-400",
+            ].join(" ")}
+            title={selected ? "Hapus dari perbandingan" : "Tambah ke perbandingan"}
+          >
+            {selected && <span className="text-[10px] font-bold leading-none">✓</span>}
+          </button>
+        )}
+        <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-zinc-100 dark:bg-zinc-800">
           <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
             {item.ticker.slice(0, 4)}
           </span>
         </div>
+      </div>
+
+      <Link
+        href={`/watchlist/${item.ticker}`}
+        className="min-w-0 flex-1"
+      >
         <div className="min-w-0">
           <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate">
             {item.ticker}

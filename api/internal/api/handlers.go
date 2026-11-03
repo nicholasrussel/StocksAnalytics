@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -43,11 +44,13 @@ func NewServer(db *store.DB, finnhub *news.FinnhubClient, marketaux *news.Market
 		user.GET("/watchlist", s.getWatchlist)
 		user.POST("/watchlist", s.addToWatchlist)
 		user.DELETE("/watchlist/:ticker", s.removeFromWatchlist)
+		user.GET("/stocks/compare", s.compareStocks) // must be before :ticker routes
 		user.GET("/stocks/:ticker/news", s.getStockNews)
 		user.GET("/stocks/:ticker/analyze", s.getStockAnalysis)
 		user.GET("/stocks/:ticker/fundamentals", s.getFundamentals)
 		user.GET("/stocks/:ticker/insider-trading", s.getInsiderTrading)
 		user.GET("/markets/news", s.getMarketsNews)
+		user.GET("/sectors", s.getSectors)
 		user.POST("/telegram/link-token", s.createTelegramLinkToken)
 	}
 
@@ -264,6 +267,104 @@ func (s *Server) getMarketsNews(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"global": globalNews, "btc": btcNews})
 }
 
+// ── /sectors ──────────────────────────────────────────────────────────────────
+
+var sectorETFMeta = []struct {
+	Ticker string
+	Name   string
+}{
+	{"XLK", "Technology"},
+	{"XLV", "Health Care"},
+	{"XLF", "Financials"},
+	{"XLY", "Consumer Disc."},
+	{"XLP", "Consumer Staples"},
+	{"XLE", "Energy"},
+	{"XLI", "Industrials"},
+	{"XLB", "Materials"},
+	{"XLRE", "Real Estate"},
+	{"XLC", "Communication"},
+	{"XLU", "Utilities"},
+}
+
+type SectorData struct {
+	Ticker string  `json:"ticker"`
+	Name   string  `json:"name"`
+	Price  float64 `json:"price"`
+	Change float64 `json:"change_pct"`
+}
+
+func (s *Server) getSectors(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	nameMap := make(map[string]string, len(sectorETFMeta))
+	for _, m := range sectorETFMeta {
+		nameMap[m.Ticker] = m.Name
+	}
+
+	// Fetch all ETF quotes concurrently via Finnhub (free, supports ETFs)
+	type result struct {
+		ticker string
+		price  float64
+		change float64
+		err    error
+	}
+	results := make([]result, len(sectorETFMeta))
+	var wg sync.WaitGroup
+	for i, m := range sectorETFMeta {
+		wg.Add(1)
+		go func(idx int, ticker string) {
+			defer wg.Done()
+			q, err := s.finnhub.GetQuote(ctx, ticker)
+			if err != nil {
+				results[idx] = result{ticker: ticker, err: err}
+				return
+			}
+			results[idx] = result{ticker: ticker, price: q.Price, change: q.ChangePct}
+		}(i, m.Ticker)
+	}
+	wg.Wait()
+
+	sectors := make([]SectorData, 0, len(sectorETFMeta))
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		sectors = append(sectors, SectorData{
+			Ticker: r.ticker,
+			Name:   nameMap[r.ticker],
+			Price:  r.price,
+			Change: r.change,
+		})
+	}
+	if len(sectors) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch sector quotes"})
+		return
+	}
+	sort.Slice(sectors, func(i, j int) bool { return sectors[i].Change > sectors[j].Change })
+
+	// Build plain-text summary for LLM
+	var sb strings.Builder
+	for _, sd := range sectors {
+		sign := "+"
+		if sd.Change < 0 {
+			sign = ""
+		}
+		sb.WriteString(fmt.Sprintf("%s (%s): %s%.2f%%\n", sd.Ticker, sd.Name, sign, sd.Change))
+	}
+
+	var insight interface{}
+	if s.gemini != nil {
+		if ins, err := s.gemini.AnalyzeSectors(ctx, sb.String()); err == nil {
+			insight = ins
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"sectors": sectors,
+		"insight": insight,
+	})
+}
+
 func (s *Server) getFundamentals(c *gin.Context) {
 	ticker := strings.ToUpper(c.Param("ticker"))
 	ctx := c.Request.Context()
@@ -382,6 +483,48 @@ func (s *Server) getFundamentals(c *gin.Context) {
 	_ = s.db.UpsertScorecard(ctx, ticker, periodEnd, metricsJSON, flagsJSON, groupStatus, string(insightJSON))
 
 	c.JSON(http.StatusOK, gin.H{"scorecard": sc, "insight": insight, "cached": false})
+}
+
+func (s *Server) compareStocks(c *gin.Context) {
+	raw := c.Query("tickers")
+	if raw == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tickers required"})
+		return
+	}
+	var tickers []string
+	for _, t := range strings.Split(raw, ",") {
+		t = strings.ToUpper(strings.TrimSpace(t))
+		if t != "" {
+			tickers = append(tickers, t)
+		}
+	}
+	if len(tickers) > 5 {
+		tickers = tickers[:5]
+	}
+
+	type Entry struct {
+		Ticker     string          `json:"ticker"`
+		PeriodEnd  string          `json:"period_end,omitempty"`
+		ComputedAt string          `json:"computed_at,omitempty"`
+		Scorecard  json.RawMessage `json:"scorecard,omitempty"`
+	}
+
+	ctx := c.Request.Context()
+	results := make([]Entry, 0, len(tickers))
+	for _, ticker := range tickers {
+		row, err := s.db.GetLatestScorecard(ctx, ticker)
+		if err != nil {
+			results = append(results, Entry{Ticker: ticker})
+			continue
+		}
+		results = append(results, Entry{
+			Ticker:     ticker,
+			PeriodEnd:  row.PeriodEnd.Format("2006-01-02"),
+			ComputedAt: row.ComputedAt.Format(time.RFC3339),
+			Scorecard:  row.Metrics,
+		})
+	}
+	c.JSON(http.StatusOK, results)
 }
 
 func (s *Server) getInsiderTrading(c *gin.Context) {

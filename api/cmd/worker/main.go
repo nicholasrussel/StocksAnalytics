@@ -2,18 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
-
-	"encoding/json"
-	"sync"
 
 	"github.com/joho/godotenv"
 	"github.com/tripleboys27/stock-dashboard/api/internal/fmp"
@@ -48,7 +48,9 @@ func main() {
 	bot := telegram.NewBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	finnhub := news.NewFinnhubClient(os.Getenv("FINNHUB_API_KEY"))
 	gemini := llm.NewGeminiClient(os.Getenv("GEMINI_API_KEY"), os.Getenv("LLM_MODEL"))
+
 	var fmpClient *fmp.Client
+
 	if key := os.Getenv("FMP_API_KEY"); key != "" {
 		fmpClient = fmp.NewClient(key)
 	}
@@ -71,6 +73,10 @@ func main() {
 			runNotify(ctx, db, bot)
 		case "fundamentals":
 			runFundamentals(ctx, db, fmpClient, gemini, finnhub)
+		case "market-notify":
+			runMarketNotify(ctx, db, bot, finnhub)
+		case "sector-notify":
+			runSectorNotify(ctx, db, bot, finnhub)
 		default:
 			slog.Warn("unknown job", "job", job)
 		}
@@ -408,22 +414,38 @@ func runFundamentals(ctx context.Context, db *store.DB, fmpClient *fmp.Client, g
 
 		fetch(func() error {
 			v, e := fmpClient.GetIncomeStatements(ctx, ticker, 2)
-			if e == nil { mu.Lock(); incomes = v; mu.Unlock() }
+			if e == nil {
+				mu.Lock()
+				incomes = v
+				mu.Unlock()
+			}
 			return e
 		})
 		fetch(func() error {
 			v, e := fmpClient.GetBalanceSheets(ctx, ticker, 2)
-			if e == nil { mu.Lock(); balances = v; mu.Unlock() }
+			if e == nil {
+				mu.Lock()
+				balances = v
+				mu.Unlock()
+			}
 			return e
 		})
 		fetch(func() error {
 			v, e := fmpClient.GetCashFlowStatements(ctx, ticker, 2)
-			if e == nil { mu.Lock(); cashflows = v; mu.Unlock() }
+			if e == nil {
+				mu.Lock()
+				cashflows = v
+				mu.Unlock()
+			}
 			return e
 		})
 		fetch(func() error {
 			v, e := fmpClient.GetQuote(ctx, ticker)
-			if e == nil { mu.Lock(); quote = v; mu.Unlock() }
+			if e == nil {
+				mu.Lock()
+				quote = v
+				mu.Unlock()
+			}
 			return e
 		})
 		wg.Wait()
@@ -479,4 +501,194 @@ func runFundamentals(ctx context.Context, db *store.DB, fmpClient *fmp.Client, g
 	}
 
 	slog.Info("fundamentals: done", "refreshed", refreshed, "skipped_fresh", skipped, "failed", failed)
+}
+
+// ── market-notify ─────────────────────────────────────────────────────────────
+
+func runMarketNotify(ctx context.Context, db *store.DB, bot *telegram.Bot, finnhub *news.FinnhubClient) {
+	chatIDs, err := db.GetLinkedChatIDs(ctx)
+	if err != nil {
+		slog.Error("market-notify: get chat IDs failed", "err", err)
+		return
+	}
+	if len(chatIDs) == 0 {
+		slog.Info("market-notify: no linked users, skipping")
+		return
+	}
+
+	var globalItems, cryptoItems []news.Item
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		items, e := finnhub.FetchMarketNews(ctx, "general")
+		if e != nil {
+			slog.Warn("market-notify: fetch general failed", "err", e)
+			return
+		}
+		globalItems = items
+	}()
+	go func() {
+		defer wg.Done()
+		items, e := finnhub.FetchMarketNews(ctx, "crypto")
+		if e != nil {
+			slog.Warn("market-notify: fetch crypto failed", "err", e)
+			return
+		}
+		cryptoItems = items
+	}()
+	wg.Wait()
+
+	if len(globalItems) == 0 && len(cryptoItems) == 0 {
+		slog.Info("market-notify: no news available, skipping")
+		return
+	}
+
+	if len(globalItems) > 5 {
+		globalItems = globalItems[:5]
+	}
+	if len(cryptoItems) > 3 {
+		cryptoItems = cryptoItems[:3]
+	}
+
+	msg := buildMarketMessage(globalItems, cryptoItems)
+	for _, chatID := range chatIDs {
+		if err := bot.SendMessage(ctx, chatID, msg); err != nil {
+			slog.Warn("market-notify: send failed", "chat_id", chatID, "err", err)
+		}
+	}
+	slog.Info("market-notify: done", "users", len(chatIDs), "global", len(globalItems), "crypto", len(cryptoItems))
+}
+
+func buildMarketMessage(global, crypto []news.Item) string {
+	var sb strings.Builder
+	sb.WriteString("🌍 <b>Global Update Hari Ini</b>\n\n")
+
+	if len(global) > 0 {
+		sb.WriteString("📰 <b>Ekonomi Global</b>\n")
+		for _, item := range global {
+			sb.WriteString(fmt.Sprintf("• <i>%s</i>\n  🔗 %s\n\n", escapeHTML(item.Headline), item.URL))
+		}
+	}
+
+	if len(crypto) > 0 {
+		sb.WriteString("₿ <b>Bitcoin &amp; Kripto</b>\n")
+		for _, item := range crypto {
+			sb.WriteString(fmt.Sprintf("• <i>%s</i>\n  🔗 %s\n\n", escapeHTML(item.Headline), item.URL))
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// ── sector-notify ─────────────────────────────────────────────────────────────
+
+// sectorETFs maps ticker → nama sektor yang mudah dibaca.
+var sectorETFs = []struct {
+	Ticker string
+	Name   string
+}{
+	{"XLK", "Technology"},
+	{"XLV", "Health Care"},
+	{"XLF", "Financials"},
+	{"XLY", "Consumer Disc."},
+	{"XLP", "Consumer Staples"},
+	{"XLE", "Energy"},
+	{"XLI", "Industrials"},
+	{"XLB", "Materials"},
+	{"XLRE", "Real Estate"},
+	{"XLC", "Communication"},
+	{"XLU", "Utilities"},
+}
+
+func runSectorNotify(ctx context.Context, db *store.DB, bot *telegram.Bot, finnhub *news.FinnhubClient) {
+	chatIDs, err := db.GetLinkedChatIDs(ctx)
+	if err != nil || len(chatIDs) == 0 {
+		slog.Info("sector-notify: no linked users, skipping")
+		return
+	}
+
+	// Fetch all ETF quotes concurrently via Finnhub (free, supports ETFs)
+	type quoteResult struct {
+		idx int
+		pct float64
+		err error
+	}
+	ch := make(chan quoteResult, len(sectorETFs))
+	for i, s := range sectorETFs {
+		go func(idx int, ticker string) {
+			q, e := finnhub.GetQuote(ctx, ticker)
+			if e != nil {
+				ch <- quoteResult{idx: idx, err: e}
+				return
+			}
+			ch <- quoteResult{idx: idx, pct: q.ChangePct}
+		}(i, s.Ticker)
+	}
+
+	pctByIdx := make(map[int]float64, len(sectorETFs))
+	for range sectorETFs {
+		r := <-ch
+		if r.err != nil {
+			slog.Warn("sector-notify: quote fetch failed", "ticker", sectorETFs[r.idx].Ticker, "err", r.err)
+			continue
+		}
+		pctByIdx[r.idx] = r.pct
+	}
+
+	entries := make([]sectorEntry, 0, len(sectorETFs))
+	for i, s := range sectorETFs {
+		if pct, ok := pctByIdx[i]; ok {
+			entries = append(entries, sectorEntry{s.Ticker, s.Name, pct})
+		}
+	}
+	if len(entries) == 0 {
+		slog.Warn("sector-notify: no quotes fetched, skipping")
+		return
+	}
+
+	// Sort descending (sektor terbaik di atas)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Pct > entries[j].Pct })
+
+	msg := buildSectorMessage(entries)
+	for _, chatID := range chatIDs {
+		if err := bot.SendMessage(ctx, chatID, msg); err != nil {
+			slog.Warn("sector-notify: send failed", "chat_id", chatID, "err", err)
+		}
+	}
+	slog.Info("sector-notify: done", "users", len(chatIDs), "sectors", len(entries))
+}
+
+type sectorEntry struct {
+	Ticker string
+	Name   string
+	Pct    float64
+}
+
+func buildSectorMessage(entries []sectorEntry) string {
+	var sb strings.Builder
+	sb.WriteString("📡 <b>Sektor US — Siapa Naik Siapa Turun</b>\n")
+	sb.WriteString("<i>Perubahan harian (sortir terbaik → terburuk)</i>\n\n")
+
+	for _, e := range entries {
+		var emoji string
+		switch {
+		case e.Pct >= 1.0:
+			emoji = "🟢"
+		case e.Pct >= 0:
+			emoji = "🟡"
+		case e.Pct >= -1.0:
+			emoji = "🟠"
+		default:
+			emoji = "🔴"
+		}
+		sign := "+"
+		if e.Pct < 0 {
+			sign = ""
+		}
+		sb.WriteString(fmt.Sprintf("%s <b>%s</b> — %s  <code>%s%.2f%%</code>\n",
+			emoji, e.Ticker, e.Name, sign, e.Pct))
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
 }

@@ -27,7 +27,8 @@ jobs:
           FINNHUB_API_KEY:     ${{ secrets.FINNHUB_API_KEY }}
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           LLM_MODEL:           ${{ secrets.LLM_MODEL }}
-        run: go run ./cmd/worker -jobs=news,analyze,notify
+          FMP_API_KEY:         ${{ secrets.FMP_API_KEY }}
+        run: go run ./cmd/worker -jobs=news,analyze,notify,market-notify,sector-notify
 
   fundamentals-weekly:
     runs-on: ubuntu-latest

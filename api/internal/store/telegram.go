@@ -60,6 +60,23 @@ func (db *DB) UseLinkToken(ctx context.Context, token string, chatID int64) (*Us
 	return db.GetUserByID(ctx, userID)
 }
 
+func (db *DB) GetLinkedChatIDs(ctx context.Context) ([]int64, error) {
+	rows, err := db.Query(ctx, `SELECT telegram_chat_id FROM users WHERE telegram_chat_id IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	var u User
 	err := db.QueryRow(ctx, `
