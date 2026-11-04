@@ -235,6 +235,70 @@ sentiment: positif|netral|negatif`, ticker, content)
 	return &analysis, nil
 }
 
+// AnalyzeMarketNews scores a batch of market-wide articles in a single request,
+// which keeps the free-tier quota usage at one call per run. The result has the
+// same length and order as items; an article the model skipped keeps a zero
+// value (empty Summary), so callers can fall back to the source text.
+func (c *GeminiClient) AnalyzeMarketNews(ctx context.Context, items []news.Item) ([]NewsAnalysis, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	var sb strings.Builder
+	for i, item := range items {
+		sb.WriteString(fmt.Sprintf("[%d] Judul: %s\n", i+1, item.Headline))
+		if item.Source != "" {
+			sb.WriteString(fmt.Sprintf("Sumber: %s\n", item.Source))
+		}
+		if snippet := item.Snippet(500); snippet != "" {
+			sb.WriteString(fmt.Sprintf("Cuplikan: %s\n", snippet))
+		}
+		sb.WriteString("\n")
+	}
+
+	prompt := fmt.Sprintf(`Kamu adalah analis pasar untuk investor retail Indonesia.
+Ringkas setiap berita ekonomi global dan kripto berikut agar bisa dipahami tanpa membuka tautannya.
+
+%s
+Respons JSON (jangan tambahkan teks lain), satu entri untuk setiap berita:
+{"items":[{"id":1,"importance":3,"sentiment":"netral","summary":"ringkasan 1-2 kalimat Bahasa Indonesia"}]}
+
+Aturan summary: gunakan hanya informasi dari judul dan cuplikan, jangan menambah angka atau fakta lain. Jika hanya ada judul, jelaskan isi judul itu apa adanya.
+importance: 1=tidak relevan, 2=info umum, 3=perlu perhatian, 4=penting, 5=sangat kritis
+sentiment: positif|netral|negatif (dampaknya terhadap pasar)`, sb.String())
+
+	text, err := c.generateWithLimit(ctx, prompt, 2048)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed struct {
+		Items []struct {
+			ID int `json:"id"`
+			NewsAnalysis
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(stripCodeFence(text)), &parsed); err != nil {
+		return nil, fmt.Errorf("gemini: failed to parse market news analysis: %w — raw: %.200s", err, text)
+	}
+
+	result := make([]NewsAnalysis, len(items))
+	for _, p := range parsed.Items {
+		if p.ID < 1 || p.ID > len(items) || strings.TrimSpace(p.Summary) == "" {
+			continue
+		}
+		a := p.NewsAnalysis
+		if a.Importance < 1 || a.Importance > 5 {
+			a.Importance = 3
+		}
+		if a.Sentiment == "" {
+			a.Sentiment = "netral"
+		}
+		result[p.ID-1] = a
+	}
+	return result, nil
+}
+
 // stripCodeFence removes markdown code fences (```json ... ```) from Gemini responses.
 func stripCodeFence(s string) string {
 	s = strings.TrimSpace(s)
@@ -257,6 +321,10 @@ func stripCodeFence(s string) string {
 }
 
 func (c *GeminiClient) generate(ctx context.Context, prompt string) (string, error) {
+	return c.generateWithLimit(ctx, prompt, 700)
+}
+
+func (c *GeminiClient) generateWithLimit(ctx context.Context, prompt string, maxOutputTokens int) (string, error) {
 	apiURL := fmt.Sprintf(
 		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent",
 		c.model,
@@ -268,7 +336,7 @@ func (c *GeminiClient) generate(ctx context.Context, prompt string) (string, err
 		},
 		"generationConfig": map[string]any{
 			"temperature":     0.3,
-			"maxOutputTokens": 700,
+			"maxOutputTokens": maxOutputTokens,
 		},
 	}
 

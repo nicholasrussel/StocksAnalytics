@@ -74,7 +74,7 @@ func main() {
 		case "fundamentals":
 			runFundamentals(ctx, db, fmpClient, gemini, finnhub)
 		case "market-notify":
-			runMarketNotify(ctx, db, bot, finnhub)
+			runMarketNotify(ctx, db, bot, finnhub, gemini)
 		case "sector-notify":
 			runSectorNotify(ctx, db, bot, finnhub)
 		default:
@@ -325,23 +325,25 @@ func buildNotifyMessage(items []store.NotifyCandidate) string {
 	sb.WriteString("📊 <b>Alert Watchlist Kamu</b>\n\n")
 
 	for _, item := range items {
-		sentimentEmoji := "🟡"
-		switch item.Sentiment {
-		case "positif":
-			sentimentEmoji = "🟢"
-		case "negatif":
-			sentimentEmoji = "🔴"
-		}
-
-		sb.WriteString(fmt.Sprintf("<b>%s</b> %s %s | Penting: %d/5\n", item.Ticker, sentimentEmoji, item.Sentiment, item.Importance))
+		sb.WriteString(fmt.Sprintf("<b>%s</b> %s %s | Penting: %d/5\n", item.Ticker, sentimentEmoji(item.Sentiment), item.Sentiment, item.Importance))
 		sb.WriteString(fmt.Sprintf("<i>%s</i>\n", escapeHTML(item.Title)))
 		if item.Summary != "" {
-			sb.WriteString(item.Summary + "\n")
+			sb.WriteString(escapeHTML(item.Summary) + "\n")
 		}
-		sb.WriteString(fmt.Sprintf("🔗 %s\n\n", item.URL))
+		sb.WriteString(fmt.Sprintf("🔗 %s\n\n", escapeHTML(item.URL)))
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+func sentimentEmoji(sentiment string) string {
+	switch sentiment {
+	case "positif":
+		return "🟢"
+	case "negatif":
+		return "🔴"
+	}
+	return "🟡"
 }
 
 func escapeHTML(s string) string {
@@ -505,7 +507,7 @@ func runFundamentals(ctx context.Context, db *store.DB, fmpClient *fmp.Client, g
 
 // ── market-notify ─────────────────────────────────────────────────────────────
 
-func runMarketNotify(ctx context.Context, db *store.DB, bot *telegram.Bot, finnhub *news.FinnhubClient) {
+func runMarketNotify(ctx context.Context, db *store.DB, bot *telegram.Bot, finnhub *news.FinnhubClient, gemini *llm.GeminiClient) {
 	chatIDs, err := db.GetLinkedChatIDs(ctx)
 	if err != nil {
 		slog.Error("market-notify: get chat IDs failed", "err", err)
@@ -551,34 +553,75 @@ func runMarketNotify(ctx context.Context, db *store.DB, bot *telegram.Bot, finnh
 		cryptoItems = cryptoItems[:3]
 	}
 
-	msg := buildMarketMessage(globalItems, cryptoItems)
+	// One LLM call per run, shared by all users. If it fails the message still
+	// goes out, using Finnhub's original summaries.
+	combined := make([]news.Item, 0, len(globalItems)+len(cryptoItems))
+	combined = append(combined, globalItems...)
+	combined = append(combined, cryptoItems...)
+	analyses, err := gemini.AnalyzeMarketNews(ctx, combined)
+	if err != nil {
+		slog.Warn("market-notify: LLM failed, using source summaries", "err", err)
+		analyses = make([]llm.NewsAnalysis, len(combined))
+	}
+
+	msgs := buildMarketMessages(globalItems, cryptoItems, analyses)
 	for _, chatID := range chatIDs {
-		if err := bot.SendMessage(ctx, chatID, msg); err != nil {
-			slog.Warn("market-notify: send failed", "chat_id", chatID, "err", err)
+		for _, msg := range msgs {
+			if err := bot.SendMessage(ctx, chatID, msg); err != nil {
+				slog.Warn("market-notify: send failed", "chat_id", chatID, "err", err)
+				break
+			}
 		}
 	}
 	slog.Info("market-notify: done", "users", len(chatIDs), "global", len(globalItems), "crypto", len(cryptoItems))
 }
 
-func buildMarketMessage(global, crypto []news.Item) string {
+const telegramMessageLimit = 4000
+
+func buildMarketMessages(global, crypto []news.Item, analyses []llm.NewsAnalysis) []string {
+	var msgs []string
 	var sb strings.Builder
 	sb.WriteString("🌍 <b>Global Update Hari Ini</b>\n\n")
 
-	if len(global) > 0 {
-		sb.WriteString("📰 <b>Ekonomi Global</b>\n")
-		for _, item := range global {
-			sb.WriteString(fmt.Sprintf("• <i>%s</i>\n  🔗 %s\n\n", escapeHTML(item.Headline), item.URL))
+	add := func(block string) {
+		if sb.Len() > 0 && sb.Len()+len(block) > telegramMessageLimit {
+			msgs = append(msgs, strings.TrimRight(sb.String(), "\n"))
+			sb.Reset()
 		}
+		sb.WriteString(block)
 	}
 
-	if len(crypto) > 0 {
-		sb.WriteString("₿ <b>Bitcoin &amp; Kripto</b>\n")
-		for _, item := range crypto {
-			sb.WriteString(fmt.Sprintf("• <i>%s</i>\n  🔗 %s\n\n", escapeHTML(item.Headline), item.URL))
+	idx := 0
+	section := func(title string, items []news.Item) {
+		for i, item := range items {
+			block := formatMarketItem(item, analyses[idx])
+			idx++
+			if i == 0 {
+				block = title + "\n" + block
+			}
+			add(block)
 		}
 	}
+	section("📰 <b>Ekonomi Global</b>", global)
+	section("₿ <b>Bitcoin &amp; Kripto</b>", crypto)
 
-	return strings.TrimRight(sb.String(), "\n")
+	return append(msgs, strings.TrimRight(sb.String(), "\n"))
+}
+
+func formatMarketItem(item news.Item, a llm.NewsAnalysis) string {
+	var sb strings.Builder
+	summary := a.Summary
+	if summary != "" {
+		sb.WriteString(fmt.Sprintf("%s %s | Penting: %d/5\n", sentimentEmoji(a.Sentiment), a.Sentiment, a.Importance))
+	} else {
+		summary = item.Snippet(300)
+	}
+	sb.WriteString(fmt.Sprintf("<i>%s</i>\n", escapeHTML(item.Headline)))
+	if summary != "" {
+		sb.WriteString(escapeHTML(summary) + "\n")
+	}
+	sb.WriteString(fmt.Sprintf("🔗 %s\n\n", escapeHTML(item.URL)))
+	return sb.String()
 }
 
 // ── sector-notify ─────────────────────────────────────────────────────────────

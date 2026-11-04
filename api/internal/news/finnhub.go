@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,16 @@ type Item struct {
 	Image       string    `json:"image"`
 	Category    string    `json:"category"`
 	PublishedAt time.Time `json:"published_at"`
+}
+
+// Snippet returns the summary cut to at most max runes, so multi-byte
+// characters are never split.
+func (i Item) Snippet(max int) string {
+	r := []rune(strings.TrimSpace(i.Summary))
+	if len(r) <= max {
+		return string(r)
+	}
+	return strings.TrimSpace(string(r[:max])) + "…"
 }
 
 type FinnhubClient struct {

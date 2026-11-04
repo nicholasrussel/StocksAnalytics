@@ -87,6 +87,13 @@ func (b *Bot) SendMessage(ctx context.Context, chatID int64, text string) error 
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var result struct {
+			Description string `json:"description"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+		return fmt.Errorf("telegram: sendMessage status %d: %s", resp.StatusCode, result.Description)
+	}
 	return nil
 }
