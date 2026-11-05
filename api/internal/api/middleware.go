@@ -11,10 +11,10 @@ import (
 )
 
 func internalKeyMiddleware() gin.HandlerFunc {
-	key := os.Getenv("INTERNAL_API_KEY")
+	key := strings.TrimSpace(os.Getenv("INTERNAL_API_KEY"))
 	return func(c *gin.Context) {
-		incoming := c.GetHeader("X-Internal-Key")
-		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(incoming)), []byte(key)) != 1 {
+		incoming := strings.TrimSpace(c.GetHeader("X-Internal-Key"))
+		if key == "" || subtle.ConstantTimeCompare([]byte(incoming), []byte(key)) != 1 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/tripleboys27/stock-dashboard/api/internal/news"
 	"github.com/tripleboys27/stock-dashboard/api/internal/scorecard"
 	"github.com/tripleboys27/stock-dashboard/api/internal/store"
+	"github.com/tripleboys27/stock-dashboard/api/internal/telegram"
 )
 
 type Server struct {
@@ -29,12 +32,20 @@ type Server struct {
 	botUsername string
 }
 
-func NewServer(db *store.DB, finnhub *news.FinnhubClient, marketaux *news.MarketauxClient, gemini *llm.GeminiClient, fmpClient *fmp.Client, edgarClient *edgar.Client, botUsername string) *gin.Engine {
+func NewServer(db *store.DB, finnhub *news.FinnhubClient, marketaux *news.MarketauxClient, gemini *llm.GeminiClient, fmpClient *fmp.Client, edgarClient *edgar.Client, botUsername string, bot *telegram.Bot, telegramWebhookSecret string) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	s := &Server{db: db, finnhub: finnhub, marketaux: marketaux, gemini: gemini, fmp: fmpClient, edgar: edgarClient, botUsername: botUsername}
 	r := gin.Default()
 
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+
+	if bot != nil && telegramWebhookSecret != "" {
+		r.POST("/telegram/webhook", telegramWebhookHandler(telegramWebhookSecret, func(ctx context.Context, msg *telegram.Message) {
+			telegram.HandleMessage(ctx, db, bot, msg)
+		}))
+	} else {
+		slog.Warn("telegram webhook disabled: TELEGRAM_BOT_TOKEN or TELEGRAM_WEBHOOK_SECRET is not set")
+	}
 
 	v1 := r.Group("/v1", internalKeyMiddleware())
 	{

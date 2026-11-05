@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 	"github.com/tripleboys27/stock-dashboard/api/internal/api"
@@ -12,10 +13,16 @@ import (
 	"github.com/tripleboys27/stock-dashboard/api/internal/llm"
 	"github.com/tripleboys27/stock-dashboard/api/internal/news"
 	"github.com/tripleboys27/stock-dashboard/api/internal/store"
+	"github.com/tripleboys27/stock-dashboard/api/internal/telegram"
 )
 
 func main() {
 	_ = godotenv.Load()
+
+	if strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")) == "" {
+		slog.Error("INTERNAL_API_KEY is required")
+		os.Exit(1)
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -44,7 +51,12 @@ func main() {
 	}
 	edgarClient := edgar.NewClient(secAgent)
 
-	r := api.NewServer(db, finnhub, marketaux, gemini, fmpClient, edgarClient, os.Getenv("TELEGRAM_BOT_USERNAME"))
+	var bot *telegram.Bot
+	if token := os.Getenv("TELEGRAM_BOT_TOKEN"); token != "" {
+		bot = telegram.NewBot(token)
+	}
+
+	r := api.NewServer(db, finnhub, marketaux, gemini, fmpClient, edgarClient, os.Getenv("TELEGRAM_BOT_USERNAME"), bot, os.Getenv("TELEGRAM_WEBHOOK_SECRET"))
 	slog.Info("starting api server", "port", port)
 	if err := r.Run(":" + port); err != nil {
 		slog.Error("server error", "err", err)

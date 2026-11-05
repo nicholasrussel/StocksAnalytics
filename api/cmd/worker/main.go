@@ -118,51 +118,9 @@ func runBotPoll(ctx context.Context, db *store.DB, bot *telegram.Bot) {
 				continue
 			}
 			slog.Info("message received", "chat_id", update.Message.Chat.ID, "text", update.Message.Text)
-			handleMessage(ctx, db, bot, update.Message)
+			telegram.HandleMessage(ctx, db, bot, update.Message)
 		}
 	}
-}
-
-func handleMessage(ctx context.Context, db *store.DB, bot *telegram.Bot, msg *telegram.Message) {
-	text := strings.TrimSpace(msg.Text)
-	chatID := msg.Chat.ID
-
-	if !strings.HasPrefix(text, "/start") {
-		return
-	}
-
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		_ = bot.SendMessage(ctx, chatID, "Gunakan link dari aplikasi web untuk menghubungkan akun kamu.")
-		return
-	}
-
-	token := parts[1]
-	user, err := db.UseLinkToken(ctx, token, chatID)
-	if err != nil {
-		var reply string
-		switch err {
-		case store.ErrTokenNotFound:
-			reply = "❌ Token tidak ditemukan. Silakan buat link baru dari aplikasi."
-		case store.ErrTokenUsed:
-			reply = "❌ Token sudah pernah digunakan."
-		case store.ErrTokenExpired:
-			reply = "❌ Token sudah kedaluwarsa. Silakan buat link baru dari aplikasi."
-		default:
-			reply = fmt.Sprintf("❌ Terjadi kesalahan: %s", err.Error())
-		}
-		_ = bot.SendMessage(ctx, chatID, reply)
-		slog.Warn("link token error", "token", token, "err", err)
-		return
-	}
-
-	name := user.Email
-	if user.Name != nil && *user.Name != "" {
-		name = *user.Name
-	}
-	reply := fmt.Sprintf("✅ Berhasil terhubung!\n\nHai <b>%s</b>, akun Telegram kamu sudah terhubung ke Stock Research Dashboard.\nKamu akan mendapat notifikasi berita penting sesuai watchlist.", name)
-	_ = bot.SendMessage(ctx, chatID, reply)
-	slog.Info("telegram linked", "user", user.Email, "chat_id", chatID)
 }
 
 // ── news ──────────────────────────────────────────────────────────────────────
