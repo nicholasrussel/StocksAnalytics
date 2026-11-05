@@ -1,14 +1,19 @@
 import "server-only";
 
-const BASE_URL = process.env.API_BASE_URL!;
 const INTERNAL_KEY = process.env.INTERNAL_API_KEY!;
+
+function goApiUrl(path: string): string {
+  // Read per call: on Vercel Services this binding exists only at runtime, not during builds.
+  const base = (process.env.API_BASE_URL ?? "").replace(/\/+$/, "");
+  return `${base}${path}`;
+}
 
 export async function goFetch(
   path: string,
   userEmail: string,
   options: RequestInit = {}
 ): Promise<Response> {
-  return fetch(`${BASE_URL}${path}`, {
+  return fetch(goApiUrl(path), {
     ...options,
     headers: {
       "Content-Type": "application/json",

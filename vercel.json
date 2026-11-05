@@ -1,0 +1,16 @@
+{
+  "services": {
+    "web": {
+      "root": "web/",
+      "framework": "nextjs",
+      "bindings": [
+        { "type": "service", "service": "api", "format": "url", "env": "API_BASE_URL" }
+      ]
+    },
+    "api": { "root": "api/" }
+  },
+  "rewrites": [
+    { "source": "/telegram/webhook", "destination": { "service": "api" } },
+    { "source": "/(.*)", "destination": { "service": "web" } }
+  ]
+}

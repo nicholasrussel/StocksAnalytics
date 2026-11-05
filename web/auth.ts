@@ -14,7 +14,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (!email) return false;
 
       try {
-        const res = await fetch(`${process.env.API_BASE_URL}/v1/me`, {
+        const res = await fetch(`${(process.env.API_BASE_URL ?? "").replace(/\/+$/, "")}/v1/me`, {
           headers: {
             "X-Internal-Key": process.env.INTERNAL_API_KEY ?? "",
             "X-User-Email": email,
