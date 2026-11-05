@@ -5,6 +5,7 @@ import { Nav } from "@/components/layout/nav";
 import { Button } from "@/components/ui/button";
 import { ComparisonTable } from "./_components/comparison-table";
 
+export const instant = false;
 
 interface Props {
   searchParams: Promise<{ tickers?: string }>;

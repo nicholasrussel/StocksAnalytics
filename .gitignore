@@ -10,10 +10,10 @@ client_secret_*.json
 
 # Neon setup artifacts (root level)
 node_modules/
-package.json
-package-lock.json
-neon.ts
-.neon
+/package.json
+/package-lock.json
+/neon.ts
+/.neon
 
 # Build artifacts
 api/bin/
